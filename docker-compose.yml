@@ -1,0 +1,49 @@
+# CPS853 Team 5 — the whole system.
+# Start everything from the project folder with:   docker compose up
+#
+# How to add your part: put your services under your section below.
+# Spark services can reuse the shared settings with   <<: *spark
+
+name: cps853
+
+# Shared settings for every Spark container
+x-spark: &spark
+  image: spark:python3
+  user: root            # lets Spark write into the project folder
+  working_dir: /work
+  volumes:
+    - ./:/work          # the project folder appears inside the container as /work
+
+services:
+
+  # ---------- Part 1: Store and batch (Allen) ----------
+
+  # Raw text -> Parquet. Bad rows go to data/quarantine/ingest.
+  ingest:
+    <<: *spark
+    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--driver-memory", "2g", "jobs/ingest.py"]
+
+  # Answers Q1-Q3 from Parquet. Saves results to data/results/. Runs after ingest finishes.
+  batch-queries:
+    <<: *spark
+    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--driver-memory", "2g", "jobs/batch_queries.py"]
+    depends_on:
+      ingest:
+        condition: service_completed_successfully
+
+  # ---------- Part 2: Stream (David) ----------
+  # TODO: Kafka broker, producer (replays rows in ts order), consumer (running result).
+  # If the producer reads the Parquet data, make it wait for ingest:
+  #   depends_on:
+  #     ingest:
+  #       condition: service_completed_successfully
+
+  # ---------- Part 3: Serve (Sachman) ----------
+  # TODO: database, plus a loader that reads data/results/ and the stream output.
+  # To wait for the batch results:
+  #   depends_on:
+  #     batch-queries:
+  #       condition: service_completed_successfully
+
+  # ---------- Part 4: Quality and monitoring (All) ----------
+  # TODO: checks, if they run as their own service.
