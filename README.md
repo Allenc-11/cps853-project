@@ -35,6 +35,7 @@ Both end with `exited with code 0`.
 |---|---|
 | `docker-compose.yml` | Starts the whole system |
 | `jobs/` | The Spark scripts |
+| `streaming/` | The Kafka scripts |
 | `data/raw/` | The dataset you downloaded |
 | `data/parquet/power/` | Clean data in Parquet, one folder per year |
 | `data/quarantine/ingest/` | Bad rows, set aside (not deleted), with a `reject_reason` |
