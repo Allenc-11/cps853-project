@@ -13,6 +13,22 @@ x-spark: &spark
   working_dir: /work
   volumes:
     - ./:/work          # the project folder appears inside the container as /work
+  environment:
+    PYTHONPATH: /work   # lets the Spark jobs use the shared quality rules (quality/rules.py)
+
+# Shared settings for the plain-Python containers (Part 3 and the stream consumer).
+# The image is built from serve/Dockerfile the first time; PG* variables point at the database.
+x-python: &python
+  build: ./serve
+  image: cps853-python
+  working_dir: /work
+  volumes:
+    - ./:/work
+  environment:
+    PGHOST: postgres
+    PGDATABASE: power
+    PGUSER: power
+    PGPASSWORD: power
 
 services:
 
@@ -54,31 +70,90 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 1
 
+  # Settings: SPEED, and for the Part 4 experiment CORRUPT_RATE, e.g.
+  #   docker compose run --rm --no-deps -e CORRUPT_RATE=0.05 producer
   producer:
-    <<: *spark
-    command: ["sh", "-c", "pip install --no-cache-dir pyarrow kafka-python && python3 streaming/producer.py"]
+    <<: *python
+    command: ["python", "-m", "streaming.producer"]
     depends_on:
       ingest:
         condition: service_completed_successfully
       kafka:
         condition: service_started
 
+  # Keeps running totals per event-time hour and saves them to PostgreSQL (Part 3).
   consumer:
-    <<: *spark
-    command: ["sh", "-c", "pip install --no-cache-dir kafka-python && python3 streaming/consumer.py"]
+    <<: *python
+    command: ["python", "-m", "streaming.consumer"]
     depends_on:
       ingest:
         condition: service_completed_successfully
       kafka:
         condition: service_started
-      
+      postgres:
+        condition: service_healthy
 
   # ---------- Part 3: Serve (Sachman) ----------
-  # TODO: database, plus a loader that reads data/results/ and the stream output.
-  # To wait for the batch results:
-  #   depends_on:
-  #     batch-queries:
-  #       condition: service_completed_successfully
+
+  # The database. Tables are created from serve/schema.sql the first time it starts.
+  # Query it by hand with:   docker compose exec postgres psql -U power -d power
+  postgres:
+    image: postgres:17.10-alpine
+    environment:
+      POSTGRES_DB: power
+      POSTGRES_USER: power
+      POSTGRES_PASSWORD: power
+    ports:
+      - "5433:5432"     # 5433 on the laptop, in case a local PostgreSQL already uses 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./serve/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      # Over TCP: during first-time setup (schema.sql) Postgres only listens on a local socket,
+      # so this passes only once the tables exist and the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U power -d power"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Loads data/results/ (batch answers) and data/quarantine/ingest into PostgreSQL.
+  load-batch:
+    <<: *python
+    command: ["python", "-m", "serve.load_batch"]
+    depends_on:
+      batch-queries:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  # Answers Q1-Q3 from PostgreSQL and times each answer, once the stream has finished.
+  # Run it again at any time (even mid-stream):   docker compose run --rm --no-deps serve-queries
+  serve-queries:
+    <<: *python
+    command: ["python", "-m", "serve.queries"]
+    depends_on:
+      load-batch:
+        condition: service_completed_successfully
+      consumer:
+        condition: service_completed_successfully
 
   # ---------- Part 4: Quality and monitoring (All) ----------
-  # TODO: checks, if they run as their own service.
+  # The checks run inside ingest (batch) and the consumer (stream), with the rules in quality/rules.py.
+
+  # Rows in and out at every stage, rows failed per check, alerts, and the rows set aside.
+  # Run it again at any time (even mid-stream):   docker compose run --rm --no-deps quality-report
+  quality-report:
+    <<: *python
+    command: ["python", "-m", "quality.report"]
+    depends_on:
+      serve-queries:
+        condition: service_completed_successfully
+
+  # Part 4 experiment only (not started by docker compose up): see quality/run_experiment.sh.
+  quality-measure:
+    <<: *python
+    command: ["python", "-m", "quality.measure"]
+    profiles: ["experiment"]
+
+volumes:
+  pgdata:     # the database's files; removed by   docker compose down -v
