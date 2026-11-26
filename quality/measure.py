@@ -48,7 +48,7 @@ ACCURACY = """
 STREAM = """
     SELECT (SELECT rows_in FROM pipeline_counts WHERE stage = '5 consumer') AS messages,
            (SELECT seconds FROM pipeline_counts WHERE stage = '5 consumer') AS seconds,
-           (SELECT rows_added FROM pipeline_counts WHERE stage = '4 producer') AS injected,
+           (SELECT coalesce(sum(messages), 0) FROM injected_messages) AS injected,
            (SELECT coalesce(sum(rows_failed_injected), 0) FROM quality_checks WHERE stage = 'stream') AS caught,
            (SELECT count(*) FROM alerts WHERE stage = 'stream') AS alerts"""
 

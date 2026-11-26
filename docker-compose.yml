@@ -9,12 +9,12 @@ name: cps853
 # Shared settings for every Spark container
 x-spark: &spark
   image: spark:python3
-  user: root            # lets Spark write into the project folder
+  user: root # lets Spark write into the project folder
   working_dir: /work
   volumes:
-    - ./:/work          # the project folder appears inside the container as /work
+    - ./:/work # the project folder appears inside the container as /work
   environment:
-    PYTHONPATH: /work   # lets the Spark jobs use the shared quality rules (quality/rules.py)
+    PYTHONPATH: /work # lets the Spark jobs use the shared quality rules (quality/rules.py)
 
 # Shared settings for the plain-Python containers (Part 3 and the stream consumer).
 # The image is built from serve/Dockerfile the first time; PG* variables point at the database.
@@ -31,23 +31,38 @@ x-python: &python
     PGPASSWORD: power
 
 services:
-
   # ---------- Part 1: Store and batch (Allen) ----------
 
   # Raw text -> Parquet. Bad rows go to data/quarantine/ingest.
   ingest:
     <<: *spark
-    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--driver-memory", "2g", "jobs/ingest.py"]
+    command:
+      [
+        "/opt/spark/bin/spark-submit",
+        "--master",
+        "local[*]",
+        "--driver-memory",
+        "2g",
+        "jobs/ingest.py",
+      ]
 
   # Answers Q1-Q3 from Parquet. Saves results to data/results/. Runs after ingest finishes.
   batch-queries:
     <<: *spark
-    command: ["/opt/spark/bin/spark-submit", "--master", "local[*]", "--driver-memory", "2g", "jobs/batch_queries.py"]
+    command:
+      [
+        "/opt/spark/bin/spark-submit",
+        "--master",
+        "local[*]",
+        "--driver-memory",
+        "2g",
+        "jobs/batch_queries.py",
+      ]
     depends_on:
       ingest:
         condition: service_completed_successfully
 
-  # ---------- Part 2: Stream (David) ----------
+    # ---------- Part 2: Stream (David) ----------
 
   # Taken from https://developer.confluent.io/confluent-tutorials/kafka-on-docker/
   # Required to run the Kafka broker
@@ -69,35 +84,30 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 1
-    healthcheck:
-      # Passes once the broker answers, so the producer and consumer do not start before it is ready.
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list > /dev/null"]
-      interval: 5s
-      timeout: 20s
-      retries: 30
-      start_period: 10s
 
-  # Replays the raw file (data/raw) into Kafka, at the same time as the batch path runs:
-  # the stream does not wait for, or use, anything the batch job writes.
-  # Settings: SPEED, and for the Part 4 experiment CORRUPT_RATE, e.g.
-  #   docker compose run --rm --no-deps -e CORRUPT_RATE=0.05 producer
   producer:
-    <<: *python
-    command: ["python", "-m", "streaming.producer"]
+    <<: *spark
+    command:
+      [
+        "sh",
+        "-c",
+        "pip install --no-cache-dir pyarrow kafka-python pandas && python3 streaming/producer.py",
+      ]
     depends_on:
       kafka:
-        condition: service_healthy
+        condition: service_started
 
-  # Checks every message (Part 4), keeps running totals per event-time hour and saves them to
-  # PostgreSQL (Part 3).
   consumer:
-    <<: *python
-    command: ["python", "-m", "streaming.consumer"]
+    <<: *spark
+    command:
+      [
+        "sh",
+        "-c",
+        "pip install --no-cache-dir kafka-python && python3 streaming/consumer.py",
+      ]
     depends_on:
       kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+        condition: service_started
 
   # ---------- Part 3: Serve (Sachman) ----------
 
@@ -110,7 +120,7 @@ services:
       POSTGRES_USER: power
       POSTGRES_PASSWORD: power
     ports:
-      - "5433:5432"     # 5433 on the laptop, in case a local PostgreSQL already uses 5432
+      - "5433:5432" # 5433 on the laptop, in case a local PostgreSQL already uses 5432
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./serve/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
@@ -162,4 +172,4 @@ services:
     profiles: ["experiment"]
 
 volumes:
-  pgdata:     # the database's files; removed by   docker compose down -v
+  pgdata: # the database's files; removed by   docker compose down -v

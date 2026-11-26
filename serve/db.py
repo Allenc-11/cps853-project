@@ -48,7 +48,9 @@ class StreamProgress:
     messages_in: int = 0
     rows_applied: int = 0
     rows_rejected: int = 0
-    rows_late: int = 0
+    rows_late: int = 0  # set aside: a duplicate, or later than the allowed lateness
+    late_applied: int = 0  # arrived out of event-time order but within the allowed lateness: added to its hour
+    recent: set = field(default_factory=set)  # minutes applied within the allowed lateness, for duplicates
     check_failures: dict = field(default_factory=dict)  # {stream check name: messages failed}
     injected_failures: dict = field(default_factory=dict)  # the same, for corrupted copies only (Part 4 experiment)
 
@@ -70,8 +72,9 @@ _UPSERT_HOUR = f"""
 
 _UPSERT_PROGRESS = """
     INSERT INTO stream_progress (topic, kafka_partition, next_offset, last_ts,
-                                 messages_in, rows_applied, rows_rejected, rows_late)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                 messages_in, rows_applied, rows_rejected, rows_late,
+                                 late_applied, recent_minutes)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamp[])
     ON CONFLICT (topic, kafka_partition) DO UPDATE SET
         next_offset = EXCLUDED.next_offset,
         last_ts = EXCLUDED.last_ts,
@@ -79,6 +82,8 @@ _UPSERT_PROGRESS = """
         rows_applied = EXCLUDED.rows_applied,
         rows_rejected = EXCLUDED.rows_rejected,
         rows_late = EXCLUDED.rows_late,
+        late_applied = EXCLUDED.late_applied,
+        recent_minutes = EXCLUDED.recent_minutes,
         updated_at = now()
 """
 
@@ -90,10 +95,15 @@ def load_stream_state(conn, topic, partition):
         for hour_start, *totals in conn.execute(f"SELECT hour_start, {_HOUR_COLUMNS} FROM stream_hourly")
     }
     row = conn.execute(
-        """SELECT next_offset, last_ts, messages_in, rows_applied, rows_rejected, rows_late
+        """SELECT next_offset, last_ts, messages_in, rows_applied, rows_rejected, rows_late,
+                  late_applied, recent_minutes
            FROM stream_progress WHERE topic = %s AND kafka_partition = %s""",
         (topic, partition)).fetchone()
-    progress = StreamProgress(*row) if row else StreamProgress()
+    progress = StreamProgress()
+    if row:
+        (progress.next_offset, progress.last_ts, progress.messages_in, progress.rows_applied,
+         progress.rows_rejected, progress.rows_late, progress.late_applied, recent) = row
+        progress.recent = set(recent)
     for name, failed, failed_injected in conn.execute(
             "SELECT check_name, rows_failed, rows_failed_injected FROM quality_checks WHERE stage = 'stream'"):
         progress.check_failures[name] = failed
@@ -124,7 +134,8 @@ def save_stream_state(conn, topic, partition, changed_hours, progress, rejects,
                 "INSERT INTO stream_rejects (kafka_offset, reason, raw_value) VALUES (%s, %s, %s)", rejects)
         cur.execute(_UPSERT_PROGRESS, (
             topic, partition, progress.next_offset, progress.last_ts, progress.messages_in,
-            progress.rows_applied, progress.rows_rejected, progress.rows_late))
+            progress.rows_applied, progress.rows_rejected, progress.rows_late,
+            progress.late_applied, sorted(progress.recent)))
         cur.executemany(_UPSERT_CHECK, [
             ("stream", order, name, progress.messages_in, progress.check_failures.get(name, 0),
              progress.injected_failures.get(name, 0))
@@ -138,18 +149,25 @@ def save_stream_state(conn, topic, partition, changed_hours, progress, rejects,
                 "INSERT INTO injected_messages (kind, expected_check, messages) VALUES (%s, %s, %s)",
                 [(kind, KINDS[kind], n) for kind, n in producer.get("injected", {}).items()])
             # Out = messages Kafka accepted, so a failed (lost) delivery makes this stage not balance.
+            # Added = duplicates and corrupted copies, sent on purpose on top of the file's readings.
             failed = producer.get("messages_failed", 0)
+            duplicates = producer.get("duplicates_sent", 0)
             notes = [f"{producer['injected_total']:,} corrupted messages added on purpose"] if producer["injected_total"] else []
+            if duplicates:
+                notes.append(f"{duplicates:,} readings sent twice")
+            if producer.get("delayed"):
+                notes.append(f"{producer['delayed']:,} readings sent late")
             if failed:
                 notes.append(f"{failed:,} messages failed to reach Kafka (lost)")
             cur.execute(_UPSERT_STAGE, (
-                "4 producer", 4, producer["rows_read"], producer["injected_total"],
+                "4 producer", 4, producer["rows_read"], producer["injected_total"] + duplicates,
                 producer.get("messages_delivered", producer["messages_sent"]), 0, None,
                 "; ".join(notes) or None))
         cur.execute(_UPSERT_STAGE, (
             "5 consumer", 5, progress.messages_in, 0, progress.rows_applied,
             progress.rows_rejected + progress.rows_late, seconds,
-            f"{progress.rows_rejected:,} set aside in stream_rejects, {progress.rows_late:,} late or repeated"))
+            f"{progress.rows_rejected:,} set aside in stream_rejects, {progress.rows_late:,} duplicate or too late; "
+            f"{progress.late_applied:,} late readings added to their hour"))
 
 
 # ---------- Part 4: stage counts, check results and alerts ----------

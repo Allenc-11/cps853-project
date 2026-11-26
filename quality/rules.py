@@ -26,6 +26,12 @@ SUBMETER_ROUNDING_WH = 1.5  # Wh: 3 sub-meters x 0.5 Wh rounding each
 ALERT_THRESHOLD = 0.02
 STREAM_ALERT_WINDOW = 10_000  # the stream is judged in windows of this many messages
 
+# Stream only: a reading up to this much older (in event time) than the newest one applied is
+# still added to its own hour; an older one is set aside as too late. The producer's late readings
+# arrive 1,000 readings (1,000 minutes) late, so a day leaves room. The consumer remembers the
+# minutes it applied within this window, to count a duplicate only once.
+ALLOWED_LATENESS_MINUTES = 1440
+
 MEASURES = ("global_active_power", "global_reactive_power", "voltage", "global_intensity",
             "sub_metering_1", "sub_metering_2", "sub_metering_3")
 
@@ -48,7 +54,7 @@ STREAM_CHECKS = {
     "impossible_power": BATCH_CHECKS["impossible_power"],
     "voltage_out_of_range": BATCH_CHECKS["voltage_out_of_range"],
     "submeters_exceed_total": BATCH_CHECKS["submeters_exceed_total"],
-    "late_or_duplicate": "duplicates: event time not after the newest reading already applied",
+    "late_or_duplicate": "duplicates: a minute already applied, or more than a day older than the newest reading",
 }
 
 

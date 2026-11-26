@@ -30,7 +30,9 @@ for run in "${RUNS[@]}"; do
   fi
 
   # Producer first and in full, so the consumer's time measures its own work, not waiting.
-  docker compose run --rm --no-deps -e SPEED="$SPEED" -e CORRUPT_RATE="$rate" producer | grep -v '^Sent '
+  # Duplicates and late delivery off, so each run measures the corruption alone.
+  docker compose run --rm --no-deps -e SPEED="$SPEED" -e CORRUPT_RATE="$rate" \
+    -e DUPLICATE_EVERY=0 -e LATE_EVERY=0 producer | grep -v '^Sent '
   log="data/quality/consumer_checks-${checks}_rate-${rate}.log"
   docker compose run --rm --no-deps -e QUALITY_CHECKS="$checks" consumer > "$log"
   grep -m 3 ALERT "$log" || echo "(no alerts)"

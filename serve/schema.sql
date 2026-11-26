@@ -101,6 +101,10 @@ CREATE TABLE stream_hourly (
 -- Where the consumer has got to, saved in the same transaction as stream_hourly, so a
 -- restarted consumer carries on from exactly the last saved message.
 -- messages_in = rows_applied + rows_rejected + rows_late (the END marker is not counted).
+-- rows_late: duplicates and readings later than the allowed lateness (set aside, counted).
+-- late_applied: of rows_applied, readings that arrived out of order but within the allowed lateness.
+-- recent_minutes: the minutes applied within the allowed lateness, so a restarted consumer still
+-- recognises a duplicate.
 CREATE TABLE stream_progress (
     topic           text    NOT NULL,
     kafka_partition integer NOT NULL,
@@ -110,6 +114,8 @@ CREATE TABLE stream_progress (
     rows_applied    bigint  NOT NULL,
     rows_rejected   bigint  NOT NULL,
     rows_late       bigint  NOT NULL,
+    late_applied    bigint  NOT NULL DEFAULT 0,
+    recent_minutes  timestamp[] NOT NULL DEFAULT '{}',
     updated_at      timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (topic, kafka_partition)
 );
