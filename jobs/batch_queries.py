@@ -8,16 +8,20 @@ Q3 How efficient is the household's electrical power usage, based on its power
    indicating inefficient electrical equipment or abnormal operating conditions?
 
 Results are printed and also saved as Parquet in data/results/ so Part 3 can load them.
+Rows in (read from Parquet) and rows out (minutes covered by the hourly results) are saved to
+data/quality/batch_queries.json for Part 4.
 
 Run from the project root (Windows PowerShell):
   docker run --rm --user root -v "${PWD}:/work" -w /work spark:python3 /opt/spark/bin/spark-submit --master "local[*]" --driver-memory 2g jobs/batch_queries.py
 """
+import json
 import time
 
 from pyspark.sql import SparkSession, Window, functions as F
 
 PARQUET = "data/parquet/power"
 RESULTS = "data/results"
+QUALITY_REPORT = "data/quality/batch_queries.json"
 MINUTES_PER_DAY = 1440
 
 # Q3 parameters (team decision, 2026-11-13)
@@ -148,8 +152,17 @@ def q3():
 
 
 df.cache()
-print(f"rows read from Parquet: {timed('load + count', df.count)}")
+rows_in = timed("load + count", df.count)
+print(f"rows read from Parquet: {rows_in}")
 timed("Q1", q1)
 timed("Q2", q2)
 timed("Q3", q3)
+
+# Every row read should land in exactly one hour of the Q3 results.
+rows_out = spark.read.parquet(f"{RESULTS}/q3_hourly").agg(F.sum("minutes")).first()[0]
+print(f"\nrows in (Parquet): {rows_in}, rows out (minutes in hourly results): {rows_out}, "
+      f"equal: {rows_in == rows_out}")
+with open(QUALITY_REPORT, "w") as f:
+    json.dump({"stage": "batch_queries", "rows_in": rows_in, "rows_out": rows_out,
+               "rows_set_aside": rows_in - rows_out}, f, indent=2)
 spark.stop()
