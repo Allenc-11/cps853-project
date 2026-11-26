@@ -66,7 +66,8 @@ CREATE TABLE q3_runs (
     avg_active_kw    double precision
 );
 
--- Rows that ingest set aside (data/quarantine/ingest), kept in their own table.
+-- Rows that ingest set aside (data/quarantine/ingest), kept in their own table. The stream sets
+-- the same raw readings aside on its own, in stream_rejects.
 CREATE TABLE quarantine_ingest (
     id                    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     raw_date              text,
@@ -141,12 +142,14 @@ CREATE TABLE pipeline_counts (
 );
 
 -- Rows failed per check and stage (quality/rules.py). A row is counted under the first check it fails.
+-- rows_failed_injected: of rows_failed, the corrupted copies added on purpose (Part 4 experiment, stream only).
 CREATE TABLE quality_checks (
     stage        text   NOT NULL,
     check_order  integer NOT NULL,
     check_name   text   NOT NULL,
     rows_checked bigint NOT NULL,
     rows_failed  bigint NOT NULL,
+    rows_failed_injected bigint NOT NULL DEFAULT 0,
     updated_at   timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (stage, check_name)
 );

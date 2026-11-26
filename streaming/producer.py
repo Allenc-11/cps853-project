@@ -2,15 +2,25 @@
 """
 Part 2a: Producer
 
-- Reads parquest data product from ingest.py (Part 1a)
-- Sorts rows by timestamp.
-- Publishes JSON messages to Kafka in order at an accelerated speed.
-- Counts Kafka's answer for every message: delivered, or failed (for example a delivery that
-  timed out because the broker was too slow). A failed message is lost, so it is counted, not hidden.
-- Ends with an END message that carries its own counts (rows read, messages sent, delivered and
+- Reads the raw text file (data/raw), the same file ingest.py (Part 1a) reads, so the stream gets
+  every reading as the meter recorded it, bad ones included. The quality checks happen in the
+  consumer (Part 4), not here.
+- Replays the lines in file order, which is event-time order (checked on the full file: every
+  timestamp is later than the one before). A reading that arrives out of order is the
+  consumer's late check to catch.
+- Sends each line as a JSON message, changing only its form, not its content: the timestamp as
+  written ("16/12/2006 17:24:00"), and each measurement as a number, or null where the file has
+  "?" or anything else that is not a number (the same as ingest.py's nullValue "?" and try_cast).
+  A line without the expected 9 fields is sent unchanged, as text, so the consumer sets it aside.
+- Publishes at an accelerated speed and counts Kafka's answer for every message: delivered, or
+  failed (for example a delivery that timed out because the broker was too slow). A failed
+  message is lost, so it is counted, not hidden.
+- Ends with an END message that carries its own counts (lines read, messages sent, delivered and
   failed), so the consumer can check that every delivered message arrived (Part 4).
 - Part 4 experiment: with CORRUPT_RATE above 0, adds a corrupted copy after that share of the
-  readings (quality/inject.py). The real readings are always sent unchanged.
+  valid readings (quality/inject.py), marked with an "injected" Kafka header so the experiment
+  can tell its catches from the real bad readings. The checks never look at the header, and the
+  real readings are always sent unchanged.
 
 Topic: power-usage
 Message format: JSON
@@ -20,7 +30,6 @@ Settings (environment variables): SPEED, CORRUPT_RATE (0 to 1, default 0), CORRU
 """
 
 # https://kafka.apache.org/community/developer/
-# Will run on clean data (ingest.py must run first)
 # Output result constantly updated as more data added (consumer)
 
 import json
@@ -29,30 +38,43 @@ import random
 import time
 from collections import Counter
 
-import pyarrow.dataset as ds
 from kafka import KafkaProducer
 
-from quality.inject import corrupt
+from quality.inject import can_corrupt, corrupt
+from quality.rules import MEASURES
 
-PARQUET = "data/parquet/power"
+RAW = "data/raw/household_power_consumption.txt"
+FIELDS = 2 + len(MEASURES)  # Date;Time;7 measurements
 TOPIC = "power-usage"
 BROKER = "kafka:9092" # 9092 is typical for apache kafka. kafka as runs inside docker
 SPEED = int(os.environ.get("SPEED", "10000"))
 CORRUPT_RATE = float(os.environ.get("CORRUPT_RATE", "0"))
 CORRUPT_SEED = int(os.environ.get("CORRUPT_SEED", "853"))  # same seed, same corrupted rows
 
-# Retrieveing the data from parquest file as dataframe
-table = ds.dataset(PARQUET, format="parquet").to_table() # All columns
 
-# Sort by event time
-rows = table.sort_by([("ts", "ascending")]).to_pylist()
+def number_or_none(text):
+    """The raw value as a number, or None for "?" or anything else that is not a number."""
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def to_message(line):
+    """(key, value) for one line of the raw file: JSON for a line with the expected fields,
+    otherwise the line itself, unchanged."""
+    fields = line.rstrip("\r\n").split(";")
+    if len(fields) != FIELDS:
+        return None, None, line.rstrip("\r\n").encode("utf-8")
+    row = {"ts": f"{fields[0]} {fields[1]}"}
+    row.update(zip(MEASURES, map(number_or_none, fields[2:])))
+    return row, row["ts"].encode("utf-8"), json.dumps(row).encode("utf-8")
+
 
 producer = KafkaProducer(
     bootstrap_servers=BROKER,
     acks="all" # acknowledgement wait
 )
-
-"""Data is now loaded. Now actually streaming data"""
 
 delivery = Counter()  # Kafka's answer for each message: "delivered" or "failed"
 
@@ -65,45 +87,48 @@ def on_failed(_error):
     delivery["failed"] += 1
 
 
-def send(key, value):
-    producer.send(TOPIC, key=key, value=value, partition=0).add_callback(on_delivered).add_errback(on_failed)
+def send(key, value, headers=None):
+    (producer.send(TOPIC, key=key, value=value, headers=headers, partition=0)
+     .add_callback(on_delivered).add_errback(on_failed))
 
 
 chooser = random.Random(CORRUPT_SEED)
 injected = Counter()
+lines_read = 0
 sent = 0
 next_pace_check = 1000
 start = time.monotonic() # Cannot go backwards
 
-for i, row in enumerate(rows, 1):
-    row["ts"] = row["ts"].strftime("%Y-%m-%d %H:%M:%S") # Converts datetime to string
-    key = row["ts"].encode("utf-8")
+with open(RAW, encoding="utf-8") as raw:
+    next(raw)  # header line
+    for lines_read, line in enumerate(raw, 1):
+        row, key, value = to_message(line)
 
-    # Sending data from producer
-    send(key, json.dumps(row).encode("utf-8"))
-    sent += 1
-
-    # Part 4 experiment: a corrupted copy straight after the real reading
-    if CORRUPT_RATE and chooser.random() < CORRUPT_RATE:
-        kind, value = corrupt(row, sum(injected.values()))
+        # Sending data from producer
         send(key, value)
-        injected[kind] += 1
         sent += 1
 
-    # Message every 50000 events
-    if i % 50000 == 0:
-        print(f"Sent {i:,} events", flush=True) # {i:,} -> formats numbers with ',' separator. Flush to force message out
+        # Part 4 experiment: a corrupted copy straight after a valid reading
+        if CORRUPT_RATE and row is not None and can_corrupt(row) and chooser.random() < CORRUPT_RATE:
+            kind, bad_value = corrupt(row, sum(injected.values()))
+            send(key, bad_value, headers=[("injected", kind.encode("utf-8"))])
+            injected[kind] += 1
+            sent += 1
 
-    # Speed control. --> sent/SPEED is expected time ; time.monotonic() - start is actual
-    if sent >= next_pace_check:
-        next_pace_check += 1000
-        delay = sent / SPEED - (time.monotonic() - start)
-        if delay > 0:
-            time.sleep(delay) # Ensures streaming cannot occur faster than expected
+        # Message every 50000 lines
+        if lines_read % 50000 == 0:
+            print(f"Sent {lines_read:,} events", flush=True) # {i:,} -> formats numbers with ',' separator. Flush to force message out
+
+        # Speed control. --> sent/SPEED is expected time ; time.monotonic() - start is actual
+        if sent >= next_pace_check:
+            next_pace_check += 1000
+            delay = sent / SPEED - (time.monotonic() - start)
+            if delay > 0:
+                time.sleep(delay) # Ensures streaming cannot occur faster than expected
 
 
 producer.flush()  # wait for Kafka's answer on every message, so the END message has final counts
-end = {"end": True, "rows_read": len(rows), "messages_sent": sent,
+end = {"end": True, "rows_read": lines_read, "messages_sent": sent,
        "messages_delivered": delivery["delivered"], "messages_failed": delivery["failed"],
        "injected_total": sum(injected.values()), "injected": dict(injected)}
 producer.send(TOPIC, key=b"END", value=json.dumps(end).encode("utf-8"), partition=0).get(timeout=60)  # b for bytes
@@ -112,7 +137,7 @@ producer.send(TOPIC, key=b"END", value=json.dumps(end).encode("utf-8"), partitio
 producer.close()
 
 print("\n=== Producer summary ===")
-print(f"Total: read {len(rows):,} readings, sent {sent:,} messages: "
+print(f"Total: read {lines_read:,} lines, sent {sent:,} messages: "
       f"{delivery['delivered']:,} delivered, {delivery['failed']:,} failed (lost).")
 if injected:
     print(f"Corrupted copies added on purpose (rate {CORRUPT_RATE:.1%}): {dict(injected)}")

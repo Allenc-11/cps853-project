@@ -1,7 +1,8 @@
 """Part 4: one report of the whole pipeline's quality, read from PostgreSQL.
 
-1. Rows in and rows out at every stage, whether each stage balances, and whether every row a
-   stage passes on reaches the next one.
+1. Rows in and rows out at every stage, whether each stage balances, whether every row a
+   stage passes on reaches the next one, and whether the batch and stream paths, which both
+   start from the raw file, read the same rows and keep the same rows.
 2. Rows failed per check, batch and stream, against the alert threshold.
 3. Alerts raised.
 4. Where the rows that were set aside are, and a sample of the latest ones.
@@ -42,7 +43,15 @@ SET_ASIDE = """
     ORDER BY 1, 3 DESC"""
 
 # Rows a stage passes on must all arrive at the next one: (from stage, to stage).
-HANDOFFS = (("1 ingest", "2 batch queries"), ("1 ingest", "4 producer"), ("4 producer", "5 consumer"))
+HANDOFFS = (("1 ingest", "2 batch queries"), ("4 producer", "5 consumer"))
+
+# The batch path (1 ingest) and the stream path (4 producer, 5 consumer) both read the raw file.
+# (label, stage, column, stage, column): the two numbers should be equal.
+PATHS_AGREE = (
+    ("raw lines read", "1 ingest", "rows_in", "4 producer", "rows_in"),
+    ("rows kept after the checks", "1 ingest", "rows_out", "5 consumer", "rows_out"),
+)
+COLUMNS = {"rows_in": 1, "rows_out": 3}  # positions in a STAGES row
 
 LATEST_REJECTS = """
     SELECT kafka_offset, reason, left(raw_value, 70) AS raw_value
@@ -73,6 +82,17 @@ def print_handoffs(stages):
         print(f"  {source} -> {target}: {sent:,} out, {received:,} in: {status}")
 
 
+def print_paths_agree(stages):
+    """Batch and stream start from the same raw file and apply the same checks."""
+    print("\n=== Batch and stream paths, both from the raw file ===")
+    for label, batch, batch_col, stream, stream_col in PATHS_AGREE:
+        if batch not in stages or stream not in stages:
+            continue
+        b, s = stages[batch][COLUMNS[batch_col]], stages[stream][COLUMNS[stream_col]]
+        status = "equal" if b == s else f"DIFFER by {s - b:+,} (stream - batch)"
+        print(f"  {label}: batch ({batch}) {b:,}, stream ({stream}) {s:,}: {status}")
+
+
 def main():
     with connect() as conn:
         print("\n=== Part 4: data quality, from PostgreSQL ===")
@@ -80,6 +100,7 @@ def main():
         unbalanced = [s[0] for s in stages if not s[5]]
         print(f"  stages that do not balance: {', '.join(unbalanced) if unbalanced else 'none'}")
         print_handoffs({s[0]: s for s in stages})
+        print_paths_agree({s[0]: s for s in stages})
 
         section(conn, f"Quality checks (a row counts under the first check it fails; "
                       f"alert above {rules.ALERT_THRESHOLD:.0%})",

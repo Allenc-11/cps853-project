@@ -114,8 +114,10 @@ QUERIES = [
         LIMIT 6"""),
 ]
 
-# Does the stream, once finished, agree with the batch job hour by hour? Both are built from the
-# same 2,049,270 Parquet rows, so every hour should match (floating-point sums to 1e-9 relative).
+# Does the stream, once finished, agree with the batch job hour by hour? Both start from the same
+# raw file: the batch from the 2,049,270 rows ingest kept, the stream from the readings its own
+# checks kept. With the same rules both keep the same rows, so every hour should match
+# (floating-point sums to 1e-9 relative).
 RECONCILE = """
     SELECT (SELECT sum(minutes) FROM q3_hourly)     AS batch_readings,
            (SELECT sum(minutes) FROM stream_hourly) AS stream_readings,

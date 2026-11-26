@@ -7,8 +7,15 @@ batch results exactly; with the checks off, the corrupted copies change the answ
 
 Each corrupted copy breaks one rule, in turn, so every stream check gets the same number of
 test messages and the counts caught can be compared kind by kind with the counts injected.
+Only valid readings are copied (can_corrupt), so that each copy breaks exactly the one rule
+meant for it: a copy of a reading that already has a missing value would be caught as missing,
+whatever was done to it. The producer marks each copy with an "injected" Kafka header, which the
+consumer uses only to count the copies' catches apart from the real bad readings.
 """
 import json
+import math
+
+from quality.rules import MEASURES, range_check
 
 # Kind of corruption -> the stream check (quality/rules.py STREAM_CHECKS) expected to catch it.
 KINDS = {
@@ -20,6 +27,14 @@ KINDS = {
     "submeter_overflow": "submeters_exceed_total",
     "repeated_reading": "late_or_duplicate",
 }
+
+
+def can_corrupt(row):
+    """True for a reading that passes every check: all measurements present and in range."""
+    values = [row.get(name) for name in MEASURES]
+    if not all(isinstance(v, float) and math.isfinite(v) for v in values):
+        return False
+    return range_check(*values) is None
 
 
 def corrupt(row, n):

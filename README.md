@@ -1,8 +1,8 @@
 # CPS853 Team 5 — Household Power Consumption
 
 Spark turns one household's electricity readings (2 million rows, 2006–2010) into
-Parquet and answers our 3 questions. Kafka replays the same rows as a stream,
-PostgreSQL serves the batch and stream results, and quality checks on both paths set bad
+Parquet and answers our 3 questions. Kafka replays the same raw file as a stream, bad readings
+included, PostgreSQL serves the batch and stream results, and quality checks on both paths set bad
 rows aside, count rows at every stage, and raise alerts.
 
 ## Before you start
@@ -16,9 +16,10 @@ rows aside, count rows at every stage, and raise alerts.
 
     docker compose up
 
-This runs everything in order:
-**ingest** (raw file → Parquet), then **batch-queries** (answers Q1–Q3) and **load-batch** (results → PostgreSQL),
-while **producer** replays the rows into Kafka and **consumer** saves running totals to PostgreSQL.
+This runs two paths side by side, both starting from the raw file:
+- batch: **ingest** (raw file → Parquet), then **batch-queries** (answers Q1–Q3), then **load-batch** (results → PostgreSQL);
+- stream: **producer** replays the raw file into Kafka, and **consumer** checks every message and saves running totals to PostgreSQL.
+
 When the stream ends (about 5 minutes), **serve-queries** answers Q1–Q3 from PostgreSQL with response times,
 and **quality-report** shows rows in and out at every stage, the quality checks, and any alerts.
 The first run downloads Spark (about 1 GB) and builds a small Python image. Ignore the `INFO` and `WARN` lines.
@@ -36,9 +37,16 @@ sub-meters add up to more than the total) ending `No alert`.
 
 then, from `batch-queries`, tables for Q1, Q2 and Q3, each with a run time,
 and from `load-batch` a row count per table with `match True` for all 7 tables.
-At the end, `consumer` prints `in == applied + set aside + late: True` and `serve-queries`
-prints the answers, `hours_that_differ` = 0 (stream and batch agree), and a response-time table.
-`quality-report` ends with every stage `balances True` and no alerts.
+While it runs, `consumer` prints `ALERT` lines for 8 windows of 10,000 messages where the meter
+recorded nothing for hours or days (see Part 4). At the end it prints
+
+    All runs:  consumed 2,075,259 messages: 2,049,270 applied, 25,989 set aside, 0 late or repeated.
+    in == applied + set aside + late: True
+
+the same rows kept and set aside as `ingest`, found by the stream's own checks. `serve-queries`
+prints the answers, `hours_that_differ` = 0 (stream and batch agree hour by hour), and a
+response-time table. `quality-report` shows every stage `balances True`, both paths `equal`, and
+the stream alerts (8 windows, each for `missing_measurement` and for `all checks`).
 Each of these ends with `exited with code 0`.
 
 **Adding your part:** add your services to `docker-compose.yml` under your section.
@@ -52,7 +60,7 @@ Each of these ends with `exited with code 0`.
 | `streaming/` | The Kafka scripts |
 | `serve/` | Part 3: database schema, batch loader, the queries for Q1–Q3 |
 | `quality/` | Part 4: the check rules, the quality report, and the corrupted-data experiment |
-| `data/raw/` | The dataset you downloaded |
+| `data/raw/` | The dataset you downloaded, read by both `ingest` and `producer` |
 | `data/parquet/power/` | Clean data in Parquet, one folder per year |
 | `data/quarantine/ingest/` | Bad rows, set aside (not deleted), with a `reject_reason` |
 | `data/results/` | Answers to Q1–Q3, for the database (Part 3), and `serve_timings.csv` (response times) |
@@ -81,7 +89,7 @@ PostgreSQL (database `power`, user `power`, password `power`) holds:
 | `quarantine_ingest` | `load-batch` | Rows ingest set aside, with `reject_reason` |
 | `stream_hourly` | `consumer` | Running totals per hour of event time, updated every 5 s |
 | `stream_progress` | `consumer` | Kafka offset reached, and messages in / applied / set aside / late |
-| `stream_rejects` | `consumer` | Stream messages that could not be used, with the reason |
+| `stream_rejects` | `consumer` | Stream messages that could not be used, with the reason (25,989 in a normal run: the same readings as `quarantine_ingest`) |
 
 Answer the questions again, with response times (works mid-stream too):
 
@@ -100,13 +108,15 @@ Add a bad row to the stream by hand (it ends up in `stream_rejects`):
 
 The consumer saves its offset with its totals, so `docker compose stop consumer` then
 `docker compose up --no-deps consumer` carries on from where it stopped without losing or repeating rows.
-(Use `--no-deps`: a plain `docker compose start consumer` also re-runs `ingest`, which the consumer depends on.)
+(Use `--no-deps` so that only the consumer starts.)
 To start again from an empty database: `docker compose down -v`.
 
 ## Part 4: quality checks and monitoring
 
-The same checks run on the batch path (`jobs/ingest.py`, Spark) and the stream path
-(`streaming/consumer.py`), with the limits in one place, `quality/rules.py`:
+Both paths read the raw file, and the same checks run on the batch path (`jobs/ingest.py`, Spark)
+and the stream path (`streaming/consumer.py`), with the limits in one place, `quality/rules.py`.
+So both set aside the same 25,989 readings and keep the same 2,049,270, which `quality-report`
+and `serve-queries` check:
 
 | Check | Batch | Stream | Catches |
 |---|---|---|---|
@@ -119,7 +129,9 @@ The same checks run on the batch path (`jobs/ingest.py`, Spark) and the stream p
 Rows that fail are **set aside, not dropped**: `quarantine_ingest` (batch) and
 `stream_rejects` (stream), with the check they failed. An **alert** is raised (printed and
 saved in `alerts`) when more than 2% of rows fail: per run for the batch, per 10,000
-messages for the stream. Rows in and out at every stage are in `pipeline_counts`, and
+messages for the stream. The real data misses 1.25% of its minutes, so the batch raises no
+alert, but the missing minutes come in long gaps (the meter recorded nothing for hours or days),
+so 8 of the stream's 207 windows go above 2% and raise an alert in a normal run. Rows in and out at every stage are in `pipeline_counts`, and
 rows failed per check in `quality_checks`. To see it all:
 
     docker compose run --rm --no-deps quality-report
@@ -131,6 +143,8 @@ To raise an alert on purpose, replay the stream with 5% corrupted messages added
     docker compose run --rm --no-deps -e CORRUPT_RATE=0.05 producer
     docker compose run --rm --no-deps consumer
 
+The producer marks each corrupted copy with an `injected` Kafka header (the checks ignore it),
+so the experiment counts what the checks caught among the copies apart from the real bad readings.
 The experiment behind the report's numbers (checks on and off, 1% and 5% corrupted, about
 15 minutes; Git Bash or WSL on Windows) writes `data/quality/experiment.csv`:
 
@@ -144,4 +158,4 @@ The experiment behind the report's numbers (checks on and off, 1% and 5% corrupt
 | `Path does not exist: .../data/raw/...` | The dataset isn't in `data\raw\`, or you're not in the project folder. |
 | `ingest` exits with an error code | Scroll up to the first `ERROR` line and fix that first; `batch-queries` won't start. |
 | `port is already allocated` for 5433 | Something else uses that port. Change `"5433:5432"` in `docker-compose.yml`. |
-| `relation "..." does not exist` | The database was created before `serve/schema.sql` changed. Run `docker compose down -v`, then `docker compose up`. |
+| `relation "..." does not exist` or `column "..." does not exist` | The database was created before `serve/schema.sql` changed. Run `docker compose down -v`, then `docker compose up`. |

@@ -2,16 +2,21 @@
 """
 Part 2b: Consumer
 
-- 'Consumes' events from the power-usage topic, which the producer fills in event-time order.
+- 'Consumes' events from the power-usage topic, which the producer fills with every line of the
+  raw file, in the file's order (event-time order), bad readings included.
 - Keeps running totals for every event-time hour, and saves them to PostgreSQL (table
   stream_hourly) every 5 seconds, so Part 3 can answer questions while rows are still arriving.
 - Prints the running answer to question 2 every 20 seconds:
   Which hours of the day use the most power, and which sub-meter drives it?
-- Part 4: checks every message with the same rules as the batch job (quality/rules.py). A message
+- Part 4: checks every message with the same rules as the batch job (quality/rules.py), so the
+  stream sets aside the same raw readings as ingest.py. A message
   that fails is set aside in table stream_rejects with the check it failed; a reading whose event
   time is not after the newest one applied (late or repeated) is counted, not added. Failures
   per check are saved in quality_checks, and an alert is raised in table alerts for every window
-  of 10,000 messages in which more than 2% fail.
+  of 10,000 messages in which more than 2% fail (in a normal run, the windows where the meter
+  recorded nothing for a long stretch). Corrupted copies the producer adds for the Part 4
+  experiment carry an "injected" header: their failures are also counted on their own, so the
+  experiment can compare them with what was injected. The checks themselves ignore the header.
 - Restarts where it stopped: totals, counts and the Kafka offset are saved in the same
   transaction (serve/db.py), and on start the consumer reloads them and reads on from that offset.
 
@@ -38,7 +43,7 @@ PARTITION = 0  # producer.py writes every row to partition 0, which keeps them i
 BROKER = "kafka:9092" # 9092 is typical for apache kafka. kafka as runs inside docker
 PRINT_INTERVAL = 20
 SAVE_INTERVAL = 5
-TS_FORMAT = "%Y-%m-%d %H:%M:%S"  # as written by producer.py. Ex: 2026-11-17 14:30:45
+TS_FORMAT = "%d/%m/%Y %H:%M:%S"  # as in the raw file, which producer.py sends unchanged. Ex: 16/12/2006 17:24:00
 CHECKS_ON = os.environ.get("QUALITY_CHECKS", "on") != "off"
 
 
@@ -131,8 +136,10 @@ def main():
         rejects.clear()
         new_alerts.clear()
 
-    def fail(check):
+    def fail(check, injected):
         progress.check_failures[check] = progress.check_failures.get(check, 0) + 1
+        if injected:
+            progress.injected_failures[check] = progress.injected_failures.get(check, 0) + 1
         window[check] += 1
 
     update_number = 0
@@ -156,17 +163,18 @@ def main():
             window_start = message.offset if window_start is None else window_start
             window_size += 1
 
+            injected = any(name == "injected" for name, _ in message.headers or ())  # Part 4 experiment only
             reading, check = validate(message.value, CHECKS_ON)
             if reading is None:
                 progress.rows_rejected += 1
-                fail(check)
+                fail(check, injected)
                 raw = message.value.decode("utf-8", errors="replace")[:1000] if message.value is not None else None
                 rejects.append((message.offset, check, raw))
             else:
                 ts, (active, reactive, _voltage, _intensity, sm1, sm2, sm3) = reading
                 if CHECKS_ON and progress.last_ts is not None and ts <= progress.last_ts:
                     progress.rows_late += 1
-                    fail("late_or_duplicate")
+                    fail("late_or_duplicate", injected)
                 else:
                     hour_start = ts.replace(minute=0, second=0)
                     totals = hours.get(hour_start)
@@ -214,6 +222,9 @@ def main():
               f"added by hand, fewer means messages lost)")
     print("Failures by check: " + ", ".join(
         f"{name} {progress.check_failures.get(name, 0):,}" for name in rules.STREAM_CHECKS))
+    if progress.injected_failures:
+        print("Of which corrupted copies added on purpose: " + ", ".join(
+            f"{name} {progress.injected_failures.get(name, 0):,}" for name in rules.STREAM_CHECKS))
     print(f"Hours saved to PostgreSQL: {len(hours):,}")
     print(f"Time taken: {time.monotonic() - start_time:.2f} seconds")
     print(f"Amount of updates: {update_number}")

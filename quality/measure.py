@@ -2,8 +2,10 @@
 
 Run after a stream run has finished (quality/run_experiment.sh does this). Prints, and appends to
 data/quality/experiment.csv:
-- what was injected and what the checks caught, kind by kind;
-- how many alerts were raised, out of how many windows;
+- what was injected and what the checks caught, kind by kind (only the corrupted copies, marked
+  by the producer's "injected" header, not the real bad readings in the raw file);
+- how many alerts were raised, out of how many windows (including the windows where the real
+  data is missing for a long stretch, which raise alerts in a normal run too);
 - how far the stream's answers are from the batch answers (built from clean Parquet), for Q1
   (total energy), Q2 (average power by hour of day) and Q3 (hours with power factor below 0.95);
 - the consumer's throughput.
@@ -20,7 +22,7 @@ from serve.queries import show
 EXPERIMENT_CSV = "data/quality/experiment.csv"
 
 CAUGHT = """
-    SELECT i.kind, i.expected_check, i.messages AS injected, coalesce(c.rows_failed, 0) AS caught
+    SELECT i.kind, i.expected_check, i.messages AS injected, coalesce(c.rows_failed_injected, 0) AS caught
     FROM injected_messages i LEFT JOIN quality_checks c
          ON c.stage = 'stream' AND c.check_name = i.expected_check
     ORDER BY i.kind"""
@@ -47,7 +49,7 @@ STREAM = """
     SELECT (SELECT rows_in FROM pipeline_counts WHERE stage = '5 consumer') AS messages,
            (SELECT seconds FROM pipeline_counts WHERE stage = '5 consumer') AS seconds,
            (SELECT rows_added FROM pipeline_counts WHERE stage = '4 producer') AS injected,
-           (SELECT coalesce(sum(rows_failed), 0) FROM quality_checks WHERE stage = 'stream') AS caught,
+           (SELECT coalesce(sum(rows_failed_injected), 0) FROM quality_checks WHERE stage = 'stream') AS caught,
            (SELECT count(*) FROM alerts WHERE stage = 'stream') AS alerts"""
 
 

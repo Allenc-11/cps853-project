@@ -9,6 +9,7 @@
 # The last run is a normal one (checks on, nothing corrupted), so the database ends up as after
 # docker compose up.
 set -euo pipefail
+export MSYS_NO_PATHCONV=1  # Git Bash on Windows: pass /opt/kafka/... to docker unchanged
 
 SPEED=${SPEED:-50000}   # producer messages per second; the consumer then reads the full topic
 RUNS=("on 0.01" "on 0.05" "off 0.01" "off 0.05" "on 0")

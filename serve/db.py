@@ -50,6 +50,7 @@ class StreamProgress:
     rows_rejected: int = 0
     rows_late: int = 0
     check_failures: dict = field(default_factory=dict)  # {stream check name: messages failed}
+    injected_failures: dict = field(default_factory=dict)  # the same, for corrupted copies only (Part 4 experiment)
 
 
 _HOUR_COLUMNS = "minutes, active_kw_sum, reactive_kw_sum, sm1_wh, sm2_wh, sm3_wh"
@@ -93,8 +94,10 @@ def load_stream_state(conn, topic, partition):
            FROM stream_progress WHERE topic = %s AND kafka_partition = %s""",
         (topic, partition)).fetchone()
     progress = StreamProgress(*row) if row else StreamProgress()
-    progress.check_failures = dict(conn.execute(
-        "SELECT check_name, rows_failed FROM quality_checks WHERE stage = 'stream'").fetchall())
+    for name, failed, failed_injected in conn.execute(
+            "SELECT check_name, rows_failed, rows_failed_injected FROM quality_checks WHERE stage = 'stream'"):
+        progress.check_failures[name] = failed
+        progress.injected_failures[name] = failed_injected
     return hours, progress
 
 
@@ -123,7 +126,8 @@ def save_stream_state(conn, topic, partition, changed_hours, progress, rejects,
             topic, partition, progress.next_offset, progress.last_ts, progress.messages_in,
             progress.rows_applied, progress.rows_rejected, progress.rows_late))
         cur.executemany(_UPSERT_CHECK, [
-            ("stream", order, name, progress.messages_in, progress.check_failures.get(name, 0))
+            ("stream", order, name, progress.messages_in, progress.check_failures.get(name, 0),
+             progress.injected_failures.get(name, 0))
             for order, name in enumerate(check_order, 1)])
         cur.executemany(_INSERT_ALERT, [
             ("stream", name, checked, failed, failed / checked, ALERT_THRESHOLD, detail)
@@ -160,11 +164,12 @@ _UPSERT_STAGE = """
 """
 
 _UPSERT_CHECK = """
-    INSERT INTO quality_checks (stage, check_order, check_name, rows_checked, rows_failed)
-    VALUES (%s, %s, %s, %s, %s)
+    INSERT INTO quality_checks (stage, check_order, check_name, rows_checked, rows_failed, rows_failed_injected)
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON CONFLICT (stage, check_name) DO UPDATE SET
         check_order = EXCLUDED.check_order, rows_checked = EXCLUDED.rows_checked,
-        rows_failed = EXCLUDED.rows_failed, updated_at = now()
+        rows_failed = EXCLUDED.rows_failed, rows_failed_injected = EXCLUDED.rows_failed_injected,
+        updated_at = now()
 """
 
 _INSERT_ALERT = """
@@ -183,7 +188,7 @@ def save_batch_stage(conn, stage, stage_order, report, check_order=(), raised=()
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(_UPSERT_STAGE, (stage, stage_order, report["rows_in"], 0, report["rows_out"],
                                     report["rows_set_aside"], None, None))
-        cur.executemany(_UPSERT_CHECK, [(stage, order, name, report["rows_in"], checks.get(name, 0))
+        cur.executemany(_UPSERT_CHECK, [(stage, order, name, report["rows_in"], checks.get(name, 0), 0)
                                         for order, name in enumerate(check_order, 1)])
         cur.execute("DELETE FROM alerts WHERE stage = %s", (stage,))
         cur.executemany(_INSERT_ALERT, [
