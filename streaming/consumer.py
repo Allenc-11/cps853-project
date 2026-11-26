@@ -13,6 +13,8 @@ Interval: 20 seconds
 
 import json
 import time
+from datetime import datetime
+from collections import Counter
 
 from kafka import KafkaConsumer
 
@@ -21,12 +23,17 @@ BROKER = "kafka:9092" # 9092 is typical for apache kafka. kafka as runs inside d
 GROUP_ID = "power-usage-consumer" # group id for consumers. There is only one
 UPDATE_INTERVAL = 20
 
-ENERGY = {
-    "kitchen_sm1": "sub_metering_1",
-    "laundry_sm2": "sub_metering_2",
-    "heater_ac_sm3": "sub_metering_3",
-    "other": "other_wh",
-    "total": "total_wh",
+TS_FORMAT = "%d/%m/%Y %H:%M:%S"
+
+# raw column name -> clean column name
+MEASURES = {
+    "Global_active_power": "global_active_power",      # kW (minute average)
+    "Global_reactive_power": "global_reactive_power",  # kW (minute average)
+    "Voltage": "voltage",                              # V
+    "Global_intensity": "global_intensity",            # A
+    "Sub_metering_1": "sub_metering_1",                # Wh in the minute (kitchen)
+    "Sub_metering_2": "sub_metering_2",                # Wh in the minute (laundry)
+    "Sub_metering_3": "sub_metering_3",                # Wh in the minute (water heater + A/C)
 }
 
 consumer = KafkaConsumer(
@@ -38,41 +45,41 @@ consumer = KafkaConsumer(
     value_deserializer=lambda v: json.loads(v.decode("utf-8"))
 )
 
+seen_keys = set()
 
-total_messages = 0
-update_amount = 1
+last_timestamp = None
 
-totals = {
-    hour: {
-        "activePower": 0,
-        "meter1": 0,
-        "meter2": 0,
-        "meter3": 0,
-        "count": 0
-    }
-    for hour in range(24)
-}
-
-# Which hours of the day use the most power, and which sub-meter drives it?
-def display_results():
-
-    print("=== Q2: average active power by hour of day (highest first) ===", flush=True)
-    print(f"Time since consuming: {last_update} seconds. Update number {update_amount}", flush=True)
-
-    sorted_hours = sorted(totals.items(), key = lambda item: item[1]["activePower"] / item[1]["count"], reverse = True) # Descending order
-
-    for hour, values in sorted_hours:
-        count = values["count"]
-        activePower = values["activePower"] / count
-        meter1 = values["meter1"] / count
-        meter2 = values["meter2"] / count
-        meter3 = values["meter3"] / count
-        print(f"Hour {hour} | Active Power {activePower} | Sub-Meter 1 {meter1} | Sub-Meter 2 {meter2} | Sub-Meter 3 {meter3}", flush= True)
+def problems(key, row, seen_keys):
+    global last_timestamp
+    issues = []
     
-    print("\n", flush=True)
+    # Duplicate check
+    if key in seen_keys:
+        issues.append("duplicate")
+    else:
+        seen_keys.add(key)
+
+    # Lateness Check
+    timestamp = datetime.strptime(row["ts"], TS_FORMAT) # %d/%m/%Y %H:%M:%S
+    if last_timestamp is not None and timestamp <= last_timestamp:
+        issues.append("late")
+    else:
+        last_timestamp = timestamp
+
+    # Bad Data
+    measurements = [
+        row.get(name) for name in MEASURES
+    ]
+
+    if all(value is None for value in measurements):
+        issues.append("all_measurements_missing")
+
+    return issues
+
+clean = []
+quarantine = []
 
 last_update = time.monotonic()
-start_time = time.monotonic()
 
 # Which hours of the day use the most power, and which sub-meter drives it?
 for message in consumer:
@@ -82,42 +89,43 @@ for message in consumer:
         break
 
     row = message.value
+    key = message.key
 
-    timestamp = row["ts"]
-    hour = int(timestamp[11:13])  # "%Y-%m-%d %H:%M:%S". Ex: 2026-11-17 14:30:45
+    issues = problems(key, row, seen_keys)
 
-    activePower = float(row["global_active_power"]) # kW
-    # totalWh = activePower * 1000 / 60
-    meter1 = float(row["sub_metering_1"]) # Wh
-    meter2 = float(row["sub_metering_2"]) # Wh
-    meter3 = float(row["sub_metering_3"]) # Wh
-
-    other = activePower - meter1 - meter2 - meter3
-
-    # Update hourly totals
-    totals[hour]["meter1"] += meter1
-    totals[hour]["meter2"] += meter2
-    totals[hour]["meter3"] += meter3
-    totals[hour]["activePower"] += activePower
-    totals[hour]["count"] += 1
-
-    total_messages += 1
+    if not issues:
+        clean.append(row)
+    else:
+        quarantine.append({
+            "key" : key.decode("utf-8", errors="replace"),
+            "row" : row,
+            "reasons" : issues
+        })
 
     # Only every 20 seconds
     now = time.monotonic()
     if now - last_update >= UPDATE_INTERVAL:        
-        update_amount += 1
+        print(f"Clean rows: {len(clean)}:,", flush=True)
+        print(f"Bad rows: {len(quarantine):,} : ", flush=True)
         last_update = now
-        display_results()
 
-update_amount += 1
-last_update = now
-display_results()
 consumer.close()
 
 print("\n=== Consumer summary ===")
-print(f"Total: consumed {total_messages:,} rows.")
+print(f"Clean rows: {len(clean)}:,")
+print(f"Bad rows: {len(quarantine):,} : ")
+reason_counts = Counter(
+    reason
+    for row in quarantine
+    for reason in row["reasons"]
+)
+for reason, count in reason_counts.items():
+    print(f"{reason}: {count:,}")
 
-time_taken = time.monotonic() - start_time
-print(f"Time taken: {time_taken:.2f} seconds")
-print(f"Amount of updates: {update_amount}")
+
+# print(f"Total: consumed {total_messages:,} rows.")
+
+# time_taken = time.monotonic() - start_time
+# print(f"Time taken: {time_taken:.2f} seconds")
+# print(f"Amount of updates: {update_amount}")
+
