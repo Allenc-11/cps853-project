@@ -7,7 +7,8 @@ data/quality/experiment.csv:
 - how many alerts were raised, out of how many windows (including the windows where the real
   data is missing for a long stretch, which raise alerts in a normal run too);
 - how far the stream's answers are from the batch answers (built from clean Parquet), for Q1
-  (total energy), Q2 (average power by hour of day) and Q3 (hours with power factor below 0.95);
+  (total energy), Q2 (average power by hour of day) and Q3 (hours with power factor below the
+  threshold in questions.py);
 - the consumer's throughput.
 
   docker compose run --rm --no-deps -e RUN_LABEL="checks on, 5%" quality-measure
@@ -15,6 +16,7 @@ data/quality/experiment.csv:
 import csv
 import os
 
+from questions import PF_THRESHOLD
 from quality import rules
 from serve.db import connect
 from serve.queries import show
@@ -28,7 +30,7 @@ CAUGHT = """
     ORDER BY i.kind"""
 
 # Stream vs batch, both per clock hour. Batch q3_hourly is built from the clean Parquet data.
-ACCURACY = """
+ACCURACY = f"""
     WITH s AS (SELECT hour_start, minutes, active_kw_sum AS p, reactive_kw_sum AS q FROM stream_hourly),
          b AS (SELECT hour_start, minutes, p, q FROM q3_hourly),
          hod AS (SELECT extract(hour FROM b.hour_start) AS h,
@@ -42,8 +44,8 @@ ACCURACY = """
                 OR abs(b.p - s.p) > 1e-9 * greatest(1, abs(b.p))) AS hours_that_differ,
            100 * ((SELECT sum(p) FROM s) / (SELECT sum(p) FROM b) - 1) AS q1_energy_error_pct,
            (SELECT max(abs(stream_kw - batch_kw)) FROM hod) AS q2_max_error_kw,
-           (SELECT count(*) FROM s WHERE p / nullif(sqrt(p * p + q * q), 0) < 0.95)
-             - (SELECT count(*) FROM b WHERE p / nullif(sqrt(p * p + q * q), 0) < 0.95) AS q3_low_pf_hours_error"""
+           (SELECT count(*) FROM s WHERE p / nullif(sqrt(p * p + q * q), 0) < {PF_THRESHOLD})
+             - (SELECT count(*) FROM b WHERE p / nullif(sqrt(p * p + q * q), 0) < {PF_THRESHOLD}) AS q3_low_pf_hours_error"""
 
 STREAM = """
     SELECT (SELECT rows_in FROM pipeline_counts WHERE stage = '5 consumer') AS messages,

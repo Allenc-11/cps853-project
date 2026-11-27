@@ -56,7 +56,7 @@ CREATE TABLE q3_hourly (
     low_pf        boolean
 );
 
--- Q3: runs of 2+ consecutive hours with power factor below 0.95.
+-- Q3: runs of 2+ consecutive hours with power factor below 0.95 (thresholds: questions.py).
 CREATE TABLE q3_runs (
     run_start        timestamp PRIMARY KEY,
     run_last_hour    timestamp NOT NULL,
@@ -89,13 +89,25 @@ CREATE TABLE quarantine_ingest (
 -- Q2 (group by hour of day) and Q3 (power factor per hour) while rows are still arriving.
 CREATE TABLE stream_hourly (
     hour_start      timestamp PRIMARY KEY,
-    minutes         integer NOT NULL,
+    minutes         bigint  NOT NULL,
     active_kw_sum   double precision NOT NULL,
     reactive_kw_sum double precision NOT NULL,
     sm1_wh          double precision NOT NULL,
     sm2_wh          double precision NOT NULL,
     sm3_wh          double precision NOT NULL,
     updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- The same totals summed by hour of day (0-23), refreshed in the same transaction as stream_hourly,
+-- so the live Q2 reads 24 rows instead of grouping every hour of the stream at query time.
+CREATE TABLE stream_hour_of_day (
+    hour          integer PRIMARY KEY,
+    minutes       bigint  NOT NULL,
+    active_kw_sum double precision NOT NULL,
+    sm1_wh        double precision NOT NULL,
+    sm2_wh        double precision NOT NULL,
+    sm3_wh        double precision NOT NULL,
+    updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
 -- Where the consumer has got to, saved in the same transaction as stream_hourly, so a

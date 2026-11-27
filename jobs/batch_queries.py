@@ -19,14 +19,13 @@ import time
 
 from pyspark.sql import SparkSession, Window, functions as F
 
+from questions import MIN_RUN_HOURS, PF_THRESHOLD  # Q3 thresholds, shared with serve/ and quality/
+
 PARQUET = "data/parquet/power"
 RESULTS = "data/results"
 QUALITY_REPORT = "data/quality/batch_queries.json"
 MINUTES_PER_DAY = 1440
 
-# Q3 parameters (team decision, 2026-11-13)
-PF_THRESHOLD = 0.95  # an hour is "low power factor" when its power factor is below this
-MIN_RUN_HOURS = 2    # a period must last at least this many consecutive hours
 
 spark = (SparkSession.builder.appName("batch_queries")
          .config("spark.sql.session.timeZone", "UTC")

@@ -68,6 +68,24 @@ _UPSERT_HOUR = f"""
         updated_at = now()
 """
 
+# Recompute the hour-of-day rows that the changed hours belong to, from stream_hourly itself, so
+# the two tables cannot disagree (absolute totals again, safe to repeat after a restart).
+_REFRESH_HOUR_OF_DAY = """
+    INSERT INTO stream_hour_of_day (hour, minutes, active_kw_sum, sm1_wh, sm2_wh, sm3_wh)
+    SELECT extract(hour FROM hour_start)::int, sum(minutes), sum(active_kw_sum),
+           sum(sm1_wh), sum(sm2_wh), sum(sm3_wh)
+    FROM stream_hourly
+    WHERE extract(hour FROM hour_start)::int = ANY(%s)
+    GROUP BY 1
+    ON CONFLICT (hour) DO UPDATE SET
+        minutes = EXCLUDED.minutes,
+        active_kw_sum = EXCLUDED.active_kw_sum,
+        sm1_wh = EXCLUDED.sm1_wh,
+        sm2_wh = EXCLUDED.sm2_wh,
+        sm3_wh = EXCLUDED.sm3_wh,
+        updated_at = now()
+"""
+
 _UPSERT_PROGRESS = """
     INSERT INTO stream_progress (topic, kafka_partition, next_offset, last_ts,
                                  messages_in, rows_applied, rows_rejected, rows_late)
@@ -119,6 +137,7 @@ def save_stream_state(conn, topic, partition, changed_hours, progress, rejects,
             cur.executemany(_UPSERT_HOUR, [
                 (hour_start, t.minutes, t.active_kw_sum, t.reactive_kw_sum, t.sm1_wh, t.sm2_wh, t.sm3_wh)
                 for hour_start, t in changed_hours.items()])
+            cur.execute(_REFRESH_HOUR_OF_DAY, (sorted({hour_start.hour for hour_start in changed_hours}),))
         if rejects:
             cur.executemany(
                 "INSERT INTO stream_rejects (kafka_offset, reason, raw_value) VALUES (%s, %s, %s)", rejects)
