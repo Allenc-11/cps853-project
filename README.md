@@ -88,6 +88,7 @@ PostgreSQL (database `power`, user `power`, password `power`) holds:
 | `q1_share`, `q1_seasonal`, `q1_monthly`, `q2_hourly`, `q3_hourly`, `q3_runs` | `load-batch` | The Spark results from `data/results/` |
 | `quarantine_ingest` | `load-batch` | Rows ingest set aside, with `reject_reason` |
 | `stream_hourly` | `consumer` | Running totals per hour of event time, updated every 5 s |
+| `stream_hour_of_day` | `consumer` | The same totals by hour of day (24 rows), for the live Q2 |
 | `stream_progress` | `consumer` | Kafka offset reached, and messages in / applied / set aside / late |
 | `stream_rejects` | `consumer` | Stream messages that could not be used, with the reason (25,989 in a normal run: the same readings as `quarantine_ingest`) |
 
