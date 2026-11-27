@@ -18,6 +18,7 @@ import math
 import statistics
 import time
 
+from questions import MIN_RUN_HOURS, PF_THRESHOLD
 from serve.db import connect
 
 RUNS = 30
@@ -72,29 +73,27 @@ QUERIES = [
         ORDER BY avg_active_kw DESC
         LIMIT 5"""),
 
+    # Reads the 24 rows the consumer keeps per hour of day (stream_hour_of_day), instead of
+    # grouping every hour in stream_hourly at query time.
     ("Q2-live", "Which hours use the most power, from the stream so far? Top 5", "stream", f"""
-        SELECT hour, round((active / minutes)::numeric, 2) AS avg_kw, minutes AS readings_so_far,
-               {MAIN_USE.format(other="other", heater="sm3", laundry="sm2", kitchen="sm1")} AS main_use
-        FROM (SELECT extract(hour FROM hour_start)::int AS hour,
-                     sum(minutes) AS minutes, sum(active_kw_sum) AS active,
-                     sum(sm1_wh) AS sm1, sum(sm2_wh) AS sm2, sum(sm3_wh) AS sm3,
-                     sum(active_kw_sum) * 1000 / 60 - sum(sm1_wh) - sum(sm2_wh) - sum(sm3_wh) AS other
-              FROM stream_hourly
-              GROUP BY 1) AS by_hour
-        ORDER BY active / minutes DESC
+        SELECT hour, round((active_kw_sum / minutes)::numeric, 2) AS avg_kw, minutes AS readings_so_far,
+               {MAIN_USE.format(other="other", heater="sm3_wh", laundry="sm2_wh", kitchen="sm1_wh")} AS main_use
+        FROM (SELECT *, active_kw_sum * 1000 / 60 - sm1_wh - sm2_wh - sm3_wh AS other
+              FROM stream_hour_of_day) AS by_hour
+        ORDER BY active_kw_sum / minutes DESC
         LIMIT 5"""),
 
-    ("Q3a", "How efficient is the household? Power factor per hour, overview", "batch", """
+    ("Q3a", "How efficient is the household? Power factor per hour, overview", "batch", f"""
         SELECT count(*)                                       AS hours,
                round(avg(power_factor)::numeric, 3)           AS avg_pf,
                round(min(power_factor)::numeric, 3)           AS lowest_pf,
-               count(*) FILTER (WHERE power_factor < 0.95)    AS hours_below_095,
-               round(100.0 * count(*) FILTER (WHERE power_factor < 0.95) / count(power_factor), 1)
-                                                              AS pct_below_095,
-               (SELECT count(*) FROM q3_runs)                 AS runs_of_2h_or_more
+               count(*) FILTER (WHERE power_factor < {PF_THRESHOLD}) AS hours_below_threshold,
+               round(100.0 * count(*) FILTER (WHERE power_factor < {PF_THRESHOLD}) / count(power_factor), 1)
+                                                              AS pct_below_threshold,
+               (SELECT count(*) FROM q3_runs)                 AS low_pf_periods
         FROM q3_hourly"""),
 
-    ("Q3b", "Longest periods of 2+ hours with power factor below 0.95. Top 5", "batch", """
+    ("Q3b", f"Longest periods of {MIN_RUN_HOURS}+ hours with power factor below {PF_THRESHOLD}. Top 5", "batch", """
         SELECT run_start, run_last_hour, hours,
                round(avg_power_factor::numeric, 3) AS avg_pf,
                round(min_power_factor::numeric, 3) AS lowest_pf,
@@ -103,12 +102,12 @@ QUERIES = [
         ORDER BY hours DESC, run_start
         LIMIT 5"""),
 
-    ("Q3-live", "Is the power factor low right now? Latest 6 hours from the stream", "stream", """
+    ("Q3-live", "Is the power factor low right now? Latest 6 hours from the stream", "stream", f"""
         SELECT hour_start, minutes,
                round((active_kw_sum / nullif(sqrt(active_kw_sum ^ 2 + reactive_kw_sum ^ 2), 0))::numeric, 3)
                    AS power_factor,
-               CASE WHEN active_kw_sum / nullif(sqrt(active_kw_sum ^ 2 + reactive_kw_sum ^ 2), 0) < 0.95
-                    THEN 'below 0.95' ELSE '' END AS flag
+               CASE WHEN active_kw_sum / nullif(sqrt(active_kw_sum ^ 2 + reactive_kw_sum ^ 2), 0) < {PF_THRESHOLD}
+                    THEN 'below {PF_THRESHOLD}' ELSE '' END AS flag
         FROM stream_hourly
         ORDER BY hour_start DESC
         LIMIT 6"""),

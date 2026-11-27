@@ -1,0 +1,2 @@
+# Shell scripts keep Unix line endings on every checkout, or bash (Git Bash too) rejects them.
+*.sh text eol=lf
